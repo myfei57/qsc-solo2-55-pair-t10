@@ -55,6 +55,7 @@ class Api:
         add("GET", "/api/journal", self._journal)
         add("GET", "/api/store", self._store)
         add("GET", "/api/readiness", self._readiness)
+        add("GET", "/api/calibrations", lambda params, body: self._platform.calibrations())
         add("GET", "/api/window", lambda params, body: {"mirrors": self._platform.mirrors_in_window()})
         add("POST", "/api/track", self._track)
         add("POST", "/api/circulate", self._circulate)

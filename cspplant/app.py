@@ -40,6 +40,7 @@ from .receiver.sensor import TemperatureSensor
 from .receiver.thermal import ThermalModel
 from .receiver.threshold import ThresholdModel
 from .receiver.valve import InletValve
+from .salt.calibrate import ACTION_HOLDOUT, ACTION_ROLLBACK, ACTION_VOIDED
 from .salt.loop import SaltLoop
 from .salt.persist import SaltPersistence
 from .sequence import (
@@ -527,11 +528,18 @@ class Platform:
                     severity="notice",
                     message="流量基线重新标定",
                     baseline_kg_s=round(record.baseline_kg_s, 3),
+                    tolerance_kg_s=round(record.tolerance_kg_s, 3),
                     threshold_kg_s=round(record.threshold_kg_s, 3),
                     epoch=record.epoch,
+                    operator=record.operator,
                 )
             )
             return record.as_dict()
+
+    def calibrations(self) -> dict:
+        """返回标定台账与联锁判据现状，供控制台展示。"""
+
+        return self.salt.calibration_report()
 
     def dispatch(self, pct: float, writer: str = "dispatch") -> dict:
         """登记调度负荷并按本地保护上限求值。"""
@@ -565,6 +573,7 @@ class Platform:
             self._cycles += 1
             moment = self.clock.now()
             salt_report = self.salt.step(dt)
+            self._publish_calibration_events(salt_report)
             power_kw = self.field.thermal_power_kw()
             dispatch_pct = self.field.step_dispatch(dt)
             if self.receiver.header.state() == "admitted":
@@ -599,9 +608,33 @@ class Platform:
                 "state": self.receiver.state(),
             }
 
+    # 标定事件的严重度：作废可恢复记 warning，停用联锁记 alarm，回退记 notice。
+    _CALIBRATION_SEVERITY = {
+        ACTION_VOIDED: "warning",
+        ACTION_ROLLBACK: "notice",
+        ACTION_HOLDOUT: "alarm",
+    }
+
+    def _publish_calibration_events(self, salt_report: dict) -> None:
+        """把本周期标定器带出的事件（作废／回退／停用）落审计。"""
+
+        for event in salt_report.get("calibration_events", []):
+            detail = dict(event)
+            action = str(detail.pop("action"))
+            message = str(detail.pop("message", action))
+            self.bus.publish(
+                Event.of(
+                    "salt",
+                    "salt",
+                    action,
+                    severity=self._CALIBRATION_SEVERITY.get(action, "notice"),
+                    message=message,
+                    **detail,
+                )
+            )
+
     def _signals(self) -> dict:
         """汇总告警判定需要的现场信号。"""
-
         return {
             "receiver_temperature_c": self.receiver.output_temperature_c(),
             "header_pressure_mpa": self.receiver.header.pressure_mpa(),

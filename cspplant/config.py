@@ -177,9 +177,23 @@ class ReceiverLimits:
         return float(flow_kg_s) >= self.flow_min_kg_s
 
 
+# 标定作废后的处置策略：退回上一次有效标定，或停用联锁等人工标定。
+INVALIDATION_ROLLBACK = "rollback"
+INVALIDATION_HOLDOUT = "holdout"
+INVALIDATION_POLICIES = (INVALIDATION_ROLLBACK, INVALIDATION_HOLDOUT)
+
+
 @dataclass(frozen=True)
 class SaltLimits:
-    """熔盐液位、泵升速与母管压力约束。"""
+    """熔盐液位、泵升速、流量标定与母管压力约束。
+
+    容差不再是定值：``flow_tolerance_kg_s`` 只是出厂初值，运行后按实测波动
+    （σ × ``flow_tolerance_sigma_mult``）在 ``[flow_tolerance_min_kg_s,
+    flow_tolerance_max_kg_s]`` 内自动收紧或放宽。标定有效期按实测偏差算
+    （定死，不按挂钟时间）：实测与基线的偏差持续超过
+    ``calibration_max_deviation_kg_s`` 达 ``calibration_confirm_s`` 即作废，
+    作废后按 ``interlock_on_invalidation`` 决定退回上一次标定还是停用联锁。
+    """
 
     cold_level_min_pct: float
     hot_level_max_pct: float
@@ -187,6 +201,13 @@ class SaltLimits:
     handoff_confirm_s: float
     flow_baseline_kg_s: float
     flow_tolerance_kg_s: float
+    flow_tolerance_min_kg_s: float
+    flow_tolerance_max_kg_s: float
+    flow_tolerance_sigma_mult: float
+    calibration_min_samples: int
+    calibration_max_deviation_kg_s: float
+    calibration_confirm_s: float
+    interlock_on_invalidation: str
     header_pressure_target_mpa: float
     header_pressure_max_mpa: float
 
@@ -199,6 +220,13 @@ class SaltLimits:
             handoff_confirm_s=_number(section, "handoff_confirm_s", minimum=0.1),
             flow_baseline_kg_s=_number(section, "flow_baseline_kg_s", minimum=1.0),
             flow_tolerance_kg_s=_number(section, "flow_tolerance_kg_s", minimum=0.1),
+            flow_tolerance_min_kg_s=_number(section, "flow_tolerance_min_kg_s", minimum=0.1),
+            flow_tolerance_max_kg_s=_number(section, "flow_tolerance_max_kg_s", minimum=0.1),
+            flow_tolerance_sigma_mult=_number(section, "flow_tolerance_sigma_mult", minimum=0.1),
+            calibration_min_samples=_integer(section, "calibration_min_samples", minimum=2),
+            calibration_max_deviation_kg_s=_number(section, "calibration_max_deviation_kg_s", minimum=0.1),
+            calibration_confirm_s=_number(section, "calibration_confirm_s", minimum=0.1),
+            interlock_on_invalidation=str(section.get("interlock_on_invalidation", "")),
             header_pressure_target_mpa=_number(section, "header_pressure_target_mpa", minimum=0.1),
             header_pressure_max_mpa=_number(section, "header_pressure_max_mpa", minimum=0.2),
         )
@@ -206,12 +234,23 @@ class SaltLimits:
             raise ConfigError("热盐罐上限不得超过 100%", component="config")
         if limits.header_pressure_max_mpa <= limits.header_pressure_target_mpa:
             raise ConfigError("母管压力上限必须大于目标值", component="config")
+        if limits.flow_tolerance_min_kg_s > limits.flow_tolerance_max_kg_s:
+            raise ConfigError("流量容差下限不得大于上限", component="config")
+        if not limits.flow_tolerance_min_kg_s <= limits.flow_tolerance_kg_s <= limits.flow_tolerance_max_kg_s:
+            raise ConfigError("出厂流量容差必须落在容差上下限之间", component="config")
+        if limits.calibration_max_deviation_kg_s <= limits.flow_tolerance_max_kg_s:
+            raise ConfigError("标定作废偏差带必须宽于流量容差上限", component="config")
+        if limits.interlock_on_invalidation not in INVALIDATION_POLICIES:
+            raise ConfigError(
+                f"标定作废策略必须是 {INVALIDATION_POLICIES} 之一", component="config"
+            )
         return limits
 
-    def low_flow_threshold(self, baseline_kg_s: float) -> float:
-        """按标定基线给出的低流量联锁门限。"""
+    def low_flow_threshold(self, baseline_kg_s: float, tolerance_kg_s: float | None = None) -> float:
+        """按标定基线与容差给出的低流量联锁门限；缺省容差用出厂值。"""
 
-        return float(baseline_kg_s) - self.flow_tolerance_kg_s
+        tolerance = self.flow_tolerance_kg_s if tolerance_kg_s is None else float(tolerance_kg_s)
+        return float(baseline_kg_s) - tolerance
 
     def header_overpressure(self, pressure_mpa: float) -> bool:
         """母管是否超压。"""
@@ -347,7 +386,23 @@ def default_config() -> PlatformConfig:
         irradiance=IrradianceLimits(250.0, 1100.0, 30.0, 180.0),
         field=FieldLimits(320.0, 6.0, 12, 6.0),
         receiver=ReceiverLimits(600.0, 620.0, 720.0, 42.0, 20.0, 8.0, 22.0),
-        salt=SaltLimits(18.0, 96.0, 1.4, 15.0, 58.0, 9.0, 2.5, 3.4),
+        salt=SaltLimits(
+            cold_level_min_pct=18.0,
+            hot_level_max_pct=96.0,
+            pump_ramp_kg_s2=1.4,
+            handoff_confirm_s=15.0,
+            flow_baseline_kg_s=58.0,
+            flow_tolerance_kg_s=9.0,
+            flow_tolerance_min_kg_s=4.0,
+            flow_tolerance_max_kg_s=14.0,
+            flow_tolerance_sigma_mult=3.0,
+            calibration_min_samples=30,
+            calibration_max_deviation_kg_s=18.0,
+            calibration_confirm_s=30.0,
+            interlock_on_invalidation=INVALIDATION_ROLLBACK,
+            header_pressure_target_mpa=2.5,
+            header_pressure_max_mpa=3.4,
+        ),
         steam=SteamLimits(12.0, 0.8, 6.0, 30.0, 1.0),
         wash=WashLimits(90.0, 26.0, 4.0, 9.0),
         alarm=AlarmLimits(5.0, 120.0),
@@ -396,6 +451,13 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "handoff_confirm_s": cfg.salt.handoff_confirm_s,
                 "flow_baseline_kg_s": cfg.salt.flow_baseline_kg_s,
                 "flow_tolerance_kg_s": cfg.salt.flow_tolerance_kg_s,
+                "flow_tolerance_min_kg_s": cfg.salt.flow_tolerance_min_kg_s,
+                "flow_tolerance_max_kg_s": cfg.salt.flow_tolerance_max_kg_s,
+                "flow_tolerance_sigma_mult": cfg.salt.flow_tolerance_sigma_mult,
+                "calibration_min_samples": cfg.salt.calibration_min_samples,
+                "calibration_max_deviation_kg_s": cfg.salt.calibration_max_deviation_kg_s,
+                "calibration_confirm_s": cfg.salt.calibration_confirm_s,
+                "interlock_on_invalidation": cfg.salt.interlock_on_invalidation,
                 "header_pressure_target_mpa": cfg.salt.header_pressure_target_mpa,
                 "header_pressure_max_mpa": cfg.salt.header_pressure_max_mpa,
             },

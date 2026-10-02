@@ -3,7 +3,8 @@
 把罐、泵、水力模型、标定与持久化串成一个回路：循环时推进两台泵并汇总净流量，
 同时按流量增减冷热罐存量；切换走 :class:`~cspplant.salt.handoff.TankHandoff`
 的固定顺序；标定走 :class:`~cspplant.salt.calibrate.FlowCalibrator`，标定结果
-直接改变联锁门限。
+直接改变联锁门限。稳态循环时净流量同时喂给标定器：容差按实测波动自适应，
+标定有效期按实测偏差看守，作废／回退／停用事件随循环步带出交给平台落审计。
 """
 
 from __future__ import annotations
@@ -54,7 +55,7 @@ class SaltLoop:
         self._restore()
 
     def _restore(self) -> None:
-        """重启后恢复罐位与流量基线。"""
+        """重启后恢复罐位、流量基线与标定台账。"""
 
         levels = self._persistence.read_levels()
         if levels is not None:
@@ -62,7 +63,15 @@ class SaltLoop:
             self._hot_tank.set_level_pct(levels["hot_pct"])
         baseline = self._persistence.read_baseline()
         if baseline is not None and baseline["baseline_kg_s"] > 0:
-            self._threshold.calibrate(baseline["baseline_kg_s"])
+            tolerance = baseline.get("tolerance_kg_s")
+            if isinstance(tolerance, (int, float)) and tolerance > 0:
+                self._threshold.set_tolerance(tolerance)
+            self._threshold.restore(baseline["baseline_kg_s"], baseline.get("epoch", 0))
+            if not baseline.get("active", True):
+                self._threshold.holdout(baseline.get("hold_reason", "") or "重启前联锁已停用")
+        records = self._persistence.read_calibrations()
+        if records:
+            self._calibrator.restore_records([CalibrationRecord.from_dict(item) for item in records])
 
     @property
     def limits(self) -> SaltLimits:
@@ -139,7 +148,11 @@ class SaltLoop:
         return self._hydraulic.net_flow_kg_s()
 
     def step(self, dt: float) -> dict:
-        """推进一个循环步：泵升速、净流量汇总、罐位记账、母管压力更新。"""
+        """推进一个循环步：泵升速、净流量汇总、罐位记账、母管压力更新。
+
+        稳态（单泵在运且已到目标流量）时把净流量喂给标定器：推进容差自适应
+        并看守标定有效期；作废／回退／停用事件随返回值带出，由平台落审计。
+        """
 
         if dt <= 0:
             raise ValueError("步长必须为正")
@@ -153,6 +166,11 @@ class SaltLoop:
                 except InterlockError:
                     moved = 0.0
             pressure = self._header.update(flow, self.pumps_running(), dt)
+            events: list[dict] = []
+            if self._steady() and flow > 0.0:
+                events = self._calibrator.observe(flow, dt)
+                if events:
+                    self._persist_calibration_state()
             self._persistence.save_levels(self._cold_tank.level_pct(), self._hot_tank.level_pct(), 0.0)
             return {
                 "flow_kg_s": round(flow, 3),
@@ -160,7 +178,27 @@ class SaltLoop:
                 "pressure_mpa": round(pressure, 3),
                 "pumps_running": self.pumps_running(),
                 "overpressure": self._header.overpressure(),
+                "calibration_events": events,
             }
+
+    def _steady(self) -> bool:
+        """是否处于稳态循环：恰好一台泵在运且已到目标流量。"""
+
+        running = [pump for pump in (self._cold_pump, self._hot_pump) if pump.running()]
+        return len(running) == 1 and running[0].at_target()
+
+    def _persist_calibration_state(self, ts: float = 0.0) -> None:
+        """把基线（含容差与投入状态）与标定台账一起落盘。"""
+
+        self._persistence.save_baseline(
+            self._threshold.baseline_kg_s,
+            self._threshold.epoch,
+            self._threshold.tolerance_kg_s,
+            self._threshold.active,
+            self._threshold.hold_reason,
+            ts,
+        )
+        self._persistence.save_calibrations([record.as_dict() for record in self._calibrator.records()])
 
     def changeover(self, dt: float = 1.0) -> HandoffReport:
         """执行冷热罐切换。"""
@@ -181,13 +219,30 @@ class SaltLoop:
 
         with self._lock:
             record = self._calibrator.calibrate(measured_kg_s, now, operator)
-            self._persistence.save_baseline(record.baseline_kg_s, record.epoch)
+            self._persist_calibration_state(ts=record.ts)
             return record
 
     def threshold_kg_s(self) -> float:
         """返回当前低流量联锁门限。"""
 
         return self._threshold.threshold_kg_s()
+
+    def calibration_report(self) -> dict:
+        """标定台账与联锁判据现状，供控制台展示。"""
+
+        return {
+            "policy": self._limits.interlock_on_invalidation,
+            "interlock_active": self._threshold.active,
+            "hold_reason": self._threshold.hold_reason,
+            "epoch": self._threshold.epoch,
+            "baseline_kg_s": round(self._threshold.baseline_kg_s, 3),
+            "tolerance_kg_s": round(self._threshold.tolerance_kg_s, 3),
+            "threshold_kg_s": round(self._threshold.threshold_kg_s(), 3),
+            "max_deviation_kg_s": round(self._limits.calibration_max_deviation_kg_s, 3),
+            "confirm_s": round(self._limits.calibration_confirm_s, 3),
+            "fluctuation": self._calibrator.fluctuation(),
+            "records": [record.as_dict() for record in self._calibrator.records()],
+        }
 
     def disturb(self, heat_fraction: float) -> dict:
         """注入一次热负荷扰动：热罐多进盐、冷罐多出盐。"""
@@ -218,9 +273,13 @@ class SaltLoop:
             "header_admits": self._header.admits(),
             "header_overpressure_events": self._header.overpressure_events(),
             "baseline_kg_s": round(self._threshold.baseline_kg_s, 3),
+            "tolerance_kg_s": round(self._threshold.tolerance_kg_s, 3),
             "threshold_kg_s": round(self._threshold.threshold_kg_s(), 3),
             "threshold_evaluations": self._threshold.evaluations(),
             "epoch": self._threshold.epoch,
+            "interlock_active": self._threshold.active,
+            "hold_reason": self._threshold.hold_reason,
+            "fluctuation": self._calibrator.fluctuation(),
             "changeovers": self._handoff.changeovers(),
             "calibrations": [record.as_dict() for record in self.calibrator.records()],
         }
@@ -237,6 +296,8 @@ class SaltLoop:
             pumps_running=self.pumps_running(),
             opposed_steps=self._hydraulic.opposed_steps(),
             baseline_kg_s=self._threshold.baseline_kg_s,
+            tolerance_kg_s=self._threshold.tolerance_kg_s,
             threshold_kg_s=self._threshold.threshold_kg_s(),
             epoch=self._threshold.epoch,
+            interlock_active=self._threshold.active,
         )

@@ -102,7 +102,7 @@ def _receiver_page(platform: Platform) -> str:
 
 
 def _salt_page(platform: Platform) -> str:
-    """熔盐页：罐位、泵与联锁门限。"""
+    """熔盐页：罐位、泵、联锁门限与标定台账。"""
 
     salt = platform.status()["salt"]
     rows = [
@@ -115,11 +115,25 @@ def _salt_page(platform: Platform) -> str:
         ("在运泵数", salt["cold_pump"]["running"] + salt["hot_pump"]["running"]),
         ("两泵对顶步数", salt["opposed_steps"]),
         ("流量基线 (kg/s)", salt["baseline_kg_s"]),
+        ("自适应容差 (kg/s)", salt["tolerance_kg_s"]),
         ("联锁门限 (kg/s)", salt["threshold_kg_s"]),
         ("标定代际", salt["epoch"]),
+        ("联锁状态", "投入" if salt["interlock_active"] else f"停用（{salt['hold_reason']}）"),
+        ("运行波动 σ (kg/s)", salt["fluctuation"]["sigma_kg_s"]),
         ("成功切换次数", salt["changeovers"]),
     ]
-    return _shell("熔盐控制台", _table("熔盐回路", rows))
+    body = _table("熔盐回路", rows)
+    calibration_rows = [
+        (
+            f"代际 {item['epoch']}",
+            f"基线 {item['baseline_kg_s']} / 容差 {item['tolerance_kg_s']} / 门限 {item['threshold_kg_s']}"
+            f" / 操作人 {item['operator']}"
+            + (f" / 已作废：{item['void_reason']}" if item["voided"] else " / 有效"),
+        )
+        for item in salt["calibrations"]
+    ] or [("暂无标定", "-")]
+    body += _table("标定记录", calibration_rows)
+    return _shell("熔盐控制台", body)
 
 
 def _alarm_page(platform: Platform) -> str:

@@ -17,8 +17,10 @@ class SaltSnapshot:
     pumps_running: int
     opposed_steps: int
     baseline_kg_s: float
+    tolerance_kg_s: float
     threshold_kg_s: float
     epoch: int
+    interlock_active: bool
 
     def as_dict(self) -> dict:
         return {
@@ -30,6 +32,8 @@ class SaltSnapshot:
             "pumps_running": self.pumps_running,
             "opposed_steps": self.opposed_steps,
             "baseline_kg_s": round(self.baseline_kg_s, 3),
+            "tolerance_kg_s": round(self.tolerance_kg_s, 3),
             "threshold_kg_s": round(self.threshold_kg_s, 3),
             "epoch": self.epoch,
+            "interlock_active": self.interlock_active,
         }

@@ -40,6 +40,13 @@
       "handoff_confirm_s": 15.0,
       "flow_baseline_kg_s": 58.0,
       "flow_tolerance_kg_s": 9.0,
+      "flow_tolerance_min_kg_s": 4.0,
+      "flow_tolerance_max_kg_s": 14.0,
+      "flow_tolerance_sigma_mult": 3.0,
+      "calibration_min_samples": 30,
+      "calibration_max_deviation_kg_s": 18.0,
+      "calibration_confirm_s": 30.0,
+      "interlock_on_invalidation": "rollback",
       "header_pressure_target_mpa": 2.5,
       "header_pressure_max_mpa": 3.4
     },
