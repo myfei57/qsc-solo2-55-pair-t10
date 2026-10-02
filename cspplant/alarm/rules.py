@@ -115,6 +115,22 @@ def default_rules(config: PlatformConfig) -> list[AlarmRule]:
             True,
             "主蒸汽压力偏高",
         ),
+        AlarmRule(
+            "salt-interlock-disabled",
+            "salt_interlock_armed",
+            1.0,
+            ALARM,
+            False,
+            "低流量联锁已停用，等待人工标定",
+        ),
+        AlarmRule(
+            "salt-calibration-stale",
+            "salt_calibration_fresh",
+            1.0,
+            WARNING,
+            False,
+            "流量标定已过有效期（门限仍按末代基线判定）",
+        ),
     ]
 
 

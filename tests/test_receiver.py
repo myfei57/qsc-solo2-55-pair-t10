@@ -109,8 +109,9 @@ def test_overtemperature_trips_and_reset_requires_latch_cleared():
     limits = receiver.limits
     receiver.verify_flow(limits.flow_min_kg_s + 16.0, limits.flow_confirm_s)
     receiver.admit()
+    # 流量必须高于低流量门限，否则会先触发 low_flow 跳闸而不是过温。
     for _ in range(200):
-        receiver.heat(120_000.0, 1.0, 1.0)
+        receiver.heat(120_000.0, 58.0, 1.0)
         if receiver.state() == TRIPPED:
             break
     assert receiver.state() == TRIPPED
@@ -118,6 +119,20 @@ def test_overtemperature_trips_and_reset_requires_latch_cleared():
     with pytest.raises(InterlockError):
         receiver.reset(latch_cleared=False)
     assert receiver.reset(latch_cleared=True) == COLD
+
+
+def test_low_flow_trips_receiver():
+    receiver = build_receiver()
+    limits = receiver.limits
+    receiver.verify_flow(limits.flow_min_kg_s + 16.0, limits.flow_confirm_s)
+    receiver.admit()
+    report = receiver.heat(25_000.0, 1.0, 1.0)
+    assert "low_flow" in report["violations"]
+    assert receiver.state() == TRIPPED
+    assert receiver.trip_reason() == "low_flow"
+    verdict = report["flow_verdict"]
+    assert verdict["ok"] is False
+    assert verdict["calibration_id"] == "cal-seed"
 
 
 def test_thermal_model_carries_flow_away():
@@ -130,7 +145,9 @@ def test_thermal_model_carries_flow_away():
     dry.admit()
     for _ in range(200):
         receiver.heat(25_000.0, 58.0, 1.0)
-        dry.heat(25_000.0, 0.0, 1.0)
+        # “干烧”一路直接用热模型记账（0 流量），绕开会先跳闸的联锁 heat()。
+        dry.thermal.update(25_000.0, 0.0, 1.0)
+        dry.sensor.read(dry.thermal.value_c())
     assert dry.output_temperature_c() > receiver.output_temperature_c() + 100.0
     assert dry.thermal.dry_steps() == 200
 

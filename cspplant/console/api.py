@@ -63,6 +63,8 @@ class Api:
         add("POST", "/api/changeover", lambda params, body: self._platform.changeover())
         add("POST", "/api/pump", self._pump)
         add("POST", "/api/calibrate", self._calibrate)
+        add("POST", "/api/calibrate/confirm", self._calibrate_confirm)
+        add("GET", "/api/calibrations", self._calibrations)
         add("POST", "/api/manual", self._manual)
         add("POST", "/api/manual/release", self._manual_release)
         add("POST", "/api/manual/expire", lambda params, body: self._platform.expire_manual())
@@ -231,6 +233,19 @@ class Api:
     def _calibrate(self, params: dict, body: dict) -> dict:
         measured = _as_float(body, "measured_kg_s", self._platform.salt.limits.flow_baseline_kg_s)
         return self._platform.calibrate_flow(measured, str(body.get("operator", "console")))
+
+    def _calibrate_confirm(self, params: dict, body: dict) -> dict:
+        return self._platform.confirm_calibration(str(body.get("operator", "console")))
+
+    def _calibrations(self, params: dict, body: dict) -> dict:
+        salt = self._platform.salt
+        return {
+            "current": salt.threshold.current().as_dict(),
+            "calibration_state": salt.threshold.calibration_state(self._platform.clock.now()),
+            "interlock_armed": salt.threshold.armed(),
+            "calibrations": [generation.as_dict() for generation in salt.calibrator.records()],
+            "migrations": [migration.as_dict() for migration in salt.calibrator.migrations()],
+        }
 
     def _manual(self, params: dict, body: dict) -> dict:
         return self._platform.manual_aim(

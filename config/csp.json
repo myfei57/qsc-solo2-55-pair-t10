@@ -41,7 +41,15 @@
       "flow_baseline_kg_s": 58.0,
       "flow_tolerance_kg_s": 9.0,
       "header_pressure_target_mpa": 2.5,
-      "header_pressure_max_mpa": 3.4
+      "header_pressure_max_mpa": 3.4,
+      "tolerance_k_sigma": 3.0,
+      "tolerance_floor_kg_s": 2.0,
+      "tolerance_cap_kg_s": 18.0,
+      "tolerance_ewma_alpha": 0.2,
+      "calibration_valid_for_s": 86400.0,
+      "calibration_confirm_s": 300.0,
+      "calibration_max_deviation_kg_s": 6.0,
+      "calibration_invalid_policy": "rollback"
     },
     "steam": {
       "pressure_target_mpa": 12.0,

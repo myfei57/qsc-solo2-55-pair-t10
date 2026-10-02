@@ -158,11 +158,18 @@ class Receiver:
         self._last_threshold = verdict
 
         violations: list[str] = []
-        if not verdict["ok"]:
+        low_flow_trip = False
+        if not verdict["armed"]:
+            # 联锁按回路策略被停用：不跳闸，但必须显式报出，交人工与告警处置。
+            violations.append("low_flow_interlock_disabled")
+        elif not verdict["ok"]:
             violations.append("low_flow")
+            low_flow_trip = True
         if self._limits.overtemperature(filtered):
             self.trip("overtemperature")
             violations.append("overtemperature")
+        elif low_flow_trip:
+            self.trip("low_flow")
         elif state.active or self._limits.derate_band(filtered):
             self._state = DERATED
         else:

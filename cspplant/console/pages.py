@@ -102,9 +102,17 @@ def _receiver_page(platform: Platform) -> str:
 
 
 def _salt_page(platform: Platform) -> str:
-    """熔盐页：罐位、泵与联锁门限。"""
+    """熔盐页：罐位、泵、联锁门限与标定代际。"""
 
     salt = platform.status()["salt"]
+    state_labels = {
+        "seed": "出厂基线",
+        "provisional": "待确认（临时）",
+        "confirmed": "已确认（有效期内）",
+        "stale": "已过有效期（陈旧）",
+        "disabled": "联锁已停用",
+    }
+    armed_text = "投用" if salt["interlock_armed"] else "停用（等待人工标定）"
     rows = [
         ("冷盐罐液位 (%)", f"{salt['cold_tank']['level_pct']} ({salt['cold_tank']['level_kg']} kg)"),
         ("热盐罐液位 (%)", f"{salt['hot_tank']['level_pct']} ({salt['hot_tank']['level_kg']} kg)"),
@@ -115,11 +123,41 @@ def _salt_page(platform: Platform) -> str:
         ("在运泵数", salt["cold_pump"]["running"] + salt["hot_pump"]["running"]),
         ("两泵对顶步数", salt["opposed_steps"]),
         ("流量基线 (kg/s)", salt["baseline_kg_s"]),
+        ("当前容差 (kg/s)", salt["tolerance_kg_s"]),
+        ("自适应容差 (kg/s)", salt["adaptive_tolerance_kg_s"]),
+        ("实测波动 σ (kg/s)", salt["flow_sigma_kg_s"] if salt["flow_sigma_kg_s"] is not None else "采样不足"),
         ("联锁门限 (kg/s)", salt["threshold_kg_s"]),
-        ("标定代际", salt["epoch"]),
+        ("联锁状态", armed_text),
+        ("当前标定", f"{salt['calibration_id']}（第 {salt['epoch']} 代）"),
+        ("标定状态", state_labels.get(salt["calibration_state"], salt["calibration_state"])),
+        ("作废策略", "退回上一代" if salt["invalid_policy"] == "rollback" else "停用联锁等人工"),
+        ("确认窗 / 有效期 (s)", f"{salt['confirm_window_s']} / {salt['valid_for_s']}"),
+        ("停用原因", salt["disable_reason"] or "-"),
         ("成功切换次数", salt["changeovers"]),
     ]
-    return _shell("熔盐控制台", _table("熔盐回路", rows))
+    body = _shell("熔盐控制台", _table("熔盐回路", rows))
+    cal_rows = [
+        (
+            item["calibration_id"],
+            f"第 {item['epoch']} 代 | 基线 {item['baseline_kg_s']} | 容差 "
+            f"{item['tolerance_kg_s']} | 门限 {item['threshold_kg_s']} | "
+            f"{item['state']} | {item['operator']} | {item['created_ts']}"
+            + (f" | 作废：{item['reject_reason']}" if item.get("reject_reason") else ""),
+        )
+        for item in reversed(salt["calibrations"])
+    ] or [("暂无标定记录", "-")]
+    body += _table("标定记录（代际）", cal_rows)
+    mig_rows = [
+        (
+            f"{item['ts']}",
+            f"{item['kind']}: {item['from_id'] or '—'}(代 {item['from_epoch']}) → "
+            f"{item['to_id'] or '—'}(代 {item['to_epoch']}) by {item['operator']}"
+            + (f" | {item['reason']}" if item.get("reason") else ""),
+        )
+        for item in reversed(salt["migrations"])
+    ] or [("暂无换代记录", "-")]
+    body += _table("基线换代迁移", mig_rows)
+    return body
 
 
 def _alarm_page(platform: Platform) -> str:

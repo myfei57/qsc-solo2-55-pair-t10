@@ -130,7 +130,7 @@ class Platform:
             manual_hold_s=MANUAL_HOLD_S,
         )
 
-        threshold = ThresholdModel(self.config.salt)
+        threshold = ThresholdModel(self.config.salt, now=self.clock.now())
         thermal = ThermalModel(self.config.receiver)
         self.receiver = Receiver(
             self.config.receiver,
@@ -148,6 +148,7 @@ class Platform:
             thermal,
             self.receiver.header,
             SaltPersistence(store),
+            now=self.clock.now(),
         )
 
         bypass = BypassValve(self.config.steam)
@@ -515,23 +516,89 @@ class Platform:
             return {"expired": gone, "remaining": self.field.manual.count()}
 
     def calibrate_flow(self, measured_kg_s: float, operator: str = "console") -> dict:
-        """按实测流量重新标定基线，联锁门限同步改变。"""
+        """开始一次流量标定：临时代立即参与判定，确认窗内按实测决定生效或作废。"""
 
         with self._lock:
-            record = self.salt.calibrate_flow(measured_kg_s, self.clock.now(), operator)
+            now = self.clock.now()
+            record = self.salt.calibrate_flow(measured_kg_s, now, operator)
             self.bus.publish(
                 Event.of(
                     "salt",
                     "salt",
-                    "flow_recalibrated",
+                    "flow_calibration_began",
                     severity="notice",
-                    message="流量基线重新标定",
+                    message="流量标定开始（临时基线，待确认）",
+                    calibration_id=record.calibration_id,
                     baseline_kg_s=round(record.baseline_kg_s, 3),
+                    tolerance_kg_s=round(record.tolerance_kg_s, 3),
                     threshold_kg_s=round(record.threshold_kg_s, 3),
                     epoch=record.epoch,
+                    operator=operator,
+                    confirm_s=self.config.salt.calibration_confirm_s,
                 )
             )
             return record.as_dict()
+
+    def confirm_calibration(self, operator: str = "console") -> dict:
+        """人工提前收尾标定确认窗。"""
+
+        with self._lock:
+            generation, migration = self.salt.confirm_calibration(self.clock.now())
+            self._publish_calibration_change(
+                {
+                    "calibration_id": generation.calibration_id,
+                    "epoch": generation.epoch,
+                    "state": generation.state,
+                    "reject_reason": generation.reject_reason,
+                    "migration": None if migration is None else migration.as_dict(),
+                }
+            )
+            return generation.as_dict()
+
+    def _publish_calibration_change(self, change: dict | None) -> None:
+        """把标定确认/回退/停用的结果落审计（与标定记录同一 id/epoch）。"""
+
+        if change is None:
+            return
+        calibration_id = change["calibration_id"]
+        epoch = change["epoch"]
+        state = change["state"]
+        migration = change.get("migration") or {}
+        kind = migration.get("kind", "")
+        if state == "confirmed":
+            action, severity, message = (
+                "flow_calibration_confirmed",
+                "notice",
+                f"流量标定 {calibration_id} 确认生效",
+            )
+        elif kind == "disable":
+            action, severity, message = (
+                "flow_calibration_disabled",
+                "alarm",
+                f"流量标定 {calibration_id} 作废，低流量联锁已停用，等待人工标定："
+                f"{change.get('reject_reason', '')}",
+            )
+        else:
+            action, severity, message = (
+                "flow_calibration_rejected",
+                "warning",
+                f"流量标定 {calibration_id} 作废并退回上一代："
+                f"{change.get('reject_reason', '')}",
+            )
+        self.bus.publish(
+            Event.of(
+                "salt",
+                "salt",
+                action,
+                severity=severity,
+                message=message,
+                calibration_id=calibration_id,
+                epoch=epoch,
+                state=state,
+                migration_kind=kind,
+                reject_reason=change.get("reject_reason", ""),
+            )
+        )
 
     def dispatch(self, pct: float, writer: str = "dispatch") -> dict:
         """登记调度负荷并按本地保护上限求值。"""
@@ -564,7 +631,8 @@ class Platform:
         with self._lock:
             self._cycles += 1
             moment = self.clock.now()
-            salt_report = self.salt.step(dt)
+            salt_report = self.salt.step(dt, moment)
+            self._publish_calibration_change(salt_report.get("calibration_change"))
             power_kw = self.field.thermal_power_kw()
             dispatch_pct = self.field.step_dispatch(dt)
             if self.receiver.header.state() == "admitted":
@@ -609,6 +677,11 @@ class Platform:
             "hot_tank_pct": self.salt.hot_tank.level_pct(),
             "steam_pressure_mpa": self.steam.pressure.value_mpa(),
             "salt_flow_kg_s": self.salt.flow_kg_s(),
+            # 联锁投用/陈旧是布尔健康信号：1 正常，0 异常，规则按下限 1 判。
+            "salt_interlock_armed": 1.0 if self.salt.threshold.armed() else 0.0,
+            "salt_calibration_fresh": (
+                1.0 if self.salt.threshold.calibration_state(self.clock.now()) == "confirmed" else 0.0
+            ),
         }
 
     def _evaluate_alarms(self, now: float) -> list[AlarmEvent]:
@@ -747,7 +820,7 @@ class Platform:
             },
             "valve_moves": self.receiver.valve.moves(),
             "temperature": self.temperature_report(),
-            "salt": self.salt.status(),
+            "salt": self.salt.status(self.clock.now()),
             "steam": self.steam.status(),
             "steam_pressure_updates": self.steam.pressure.updates(),
             "bypass_held_open_s": round(self.steam.bypass.held_open_s(self.clock.now()), 3),

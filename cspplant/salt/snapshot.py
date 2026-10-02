@@ -19,6 +19,10 @@ class SaltSnapshot:
     baseline_kg_s: float
     threshold_kg_s: float
     epoch: int
+    calibration_id: str = "cal-seed"
+    calibration_state: str = "seed"
+    tolerance_kg_s: float = 0.0
+    interlock_armed: bool = True
 
     def as_dict(self) -> dict:
         return {
@@ -31,5 +35,9 @@ class SaltSnapshot:
             "opposed_steps": self.opposed_steps,
             "baseline_kg_s": round(self.baseline_kg_s, 3),
             "threshold_kg_s": round(self.threshold_kg_s, 3),
+            "tolerance_kg_s": round(self.tolerance_kg_s, 3),
             "epoch": self.epoch,
+            "calibration_id": self.calibration_id,
+            "calibration_state": self.calibration_state,
+            "interlock_armed": self.interlock_armed,
         }

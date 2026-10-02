@@ -7,7 +7,8 @@
 
 from __future__ import annotations
 
-from .calibrate import CalibrationRecord, FlowCalibrator
+from .calibrate import FlowCalibrator
+from .flowstats import FlowStats
 from .handoff import HandoffReport, TankHandoff
 from .hydraulic import HydraulicLoop
 from .loop import SaltLoop
@@ -17,8 +18,8 @@ from .snapshot import SaltSnapshot
 from .tank import SaltTank
 
 __all__ = [
-    "CalibrationRecord",
     "FlowCalibrator",
+    "FlowStats",
     "HandoffReport",
     "TankHandoff",
     "HydraulicLoop",

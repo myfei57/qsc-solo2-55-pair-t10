@@ -189,9 +189,28 @@ class SaltLimits:
     flow_tolerance_kg_s: float
     header_pressure_target_mpa: float
     header_pressure_max_mpa: float
+    # 自适应容差：容差不再是拍脑袋的固定值，而是按实测波动 k*sigma 收紧/放宽，
+    # 再夹到 [floor, cap]。flow_tolerance_kg_s 退化为首代基线与波动样本不足时
+    # 的种子容差。
+    tolerance_k_sigma: float = 3.0
+    tolerance_floor_kg_s: float = 2.0
+    tolerance_cap_kg_s: float = 18.0
+    tolerance_ewma_alpha: float = 0.2
+    # 标定有效期按时间算（定死口径）：到期门限不作废，只置陈旧（stale）。
+    calibration_valid_for_s: float = 86_400.0
+    # 标定确认窗与"实测跟标定差太多"的作废门限。
+    calibration_confirm_s: float = 300.0
+    calibration_max_deviation_kg_s: float = 6.0
+    # 标定作废策略按回路定：回上一代（rollback）或停用联锁等人工（disable）。
+    calibration_invalid_policy: str = "rollback"
 
     @classmethod
     def from_mapping(cls, section: Mapping[str, Any]) -> "SaltLimits":
+        policy = str(section.get("calibration_invalid_policy", "rollback"))
+        if policy not in ("rollback", "disable"):
+            raise ConfigError(
+                "calibration_invalid_policy 必须是 rollback 或 disable", component="config"
+            )
         limits = cls(
             cold_level_min_pct=_number(section, "cold_level_min_pct", minimum=0.0),
             hot_level_max_pct=_number(section, "hot_level_max_pct", minimum=1.0),
@@ -201,17 +220,38 @@ class SaltLimits:
             flow_tolerance_kg_s=_number(section, "flow_tolerance_kg_s", minimum=0.1),
             header_pressure_target_mpa=_number(section, "header_pressure_target_mpa", minimum=0.1),
             header_pressure_max_mpa=_number(section, "header_pressure_max_mpa", minimum=0.2),
+            tolerance_k_sigma=_number(section, "tolerance_k_sigma", minimum=0.1),
+            tolerance_floor_kg_s=_number(section, "tolerance_floor_kg_s", minimum=0.1),
+            tolerance_cap_kg_s=_number(section, "tolerance_cap_kg_s", minimum=0.1),
+            tolerance_ewma_alpha=_number(section, "tolerance_ewma_alpha", minimum=0.01),
+            calibration_valid_for_s=_number(section, "calibration_valid_for_s", minimum=1.0),
+            calibration_confirm_s=_number(section, "calibration_confirm_s", minimum=1.0),
+            calibration_max_deviation_kg_s=_number(
+                section, "calibration_max_deviation_kg_s", minimum=0.1
+            ),
+            calibration_invalid_policy=policy,
         )
         if limits.hot_level_max_pct > 100.0:
             raise ConfigError("热盐罐上限不得超过 100%", component="config")
         if limits.header_pressure_max_mpa <= limits.header_pressure_target_mpa:
             raise ConfigError("母管压力上限必须大于目标值", component="config")
+        if limits.tolerance_floor_kg_s > limits.tolerance_cap_kg_s:
+            raise ConfigError("容差下限不得大于容差上限", component="config")
+        if not 0.0 < limits.tolerance_ewma_alpha <= 1.0:
+            raise ConfigError("容差波动平滑系数必须落在 (0, 1] 区间", component="config")
         return limits
 
-    def low_flow_threshold(self, baseline_kg_s: float) -> float:
-        """按标定基线给出的低流量联锁门限。"""
+    def adaptive_tolerance_kg_s(self, sigma_kg_s: float) -> float:
+        """按实测波动给出的自适应容差：k*sigma 后夹到 [floor, cap]。"""
 
-        return float(baseline_kg_s) - self.flow_tolerance_kg_s
+        raw = self.tolerance_k_sigma * max(0.0, float(sigma_kg_s))
+        return min(self.tolerance_cap_kg_s, max(self.tolerance_floor_kg_s, raw))
+
+    def low_flow_threshold(self, baseline_kg_s: float, tolerance_kg_s: float | None = None) -> float:
+        """按标定基线与该代容差给出的低流量联锁门限。"""
+
+        tol = self.flow_tolerance_kg_s if tolerance_kg_s is None else float(tolerance_kg_s)
+        return float(baseline_kg_s) - tol
 
     def header_overpressure(self, pressure_mpa: float) -> bool:
         """母管是否超压。"""
@@ -347,7 +387,17 @@ def default_config() -> PlatformConfig:
         irradiance=IrradianceLimits(250.0, 1100.0, 30.0, 180.0),
         field=FieldLimits(320.0, 6.0, 12, 6.0),
         receiver=ReceiverLimits(600.0, 620.0, 720.0, 42.0, 20.0, 8.0, 22.0),
-        salt=SaltLimits(18.0, 96.0, 1.4, 15.0, 58.0, 9.0, 2.5, 3.4),
+        salt=SaltLimits(
+            18.0, 96.0, 1.4, 15.0, 58.0, 9.0, 2.5, 3.4,
+            tolerance_k_sigma=3.0,
+            tolerance_floor_kg_s=2.0,
+            tolerance_cap_kg_s=18.0,
+            tolerance_ewma_alpha=0.2,
+            calibration_valid_for_s=86_400.0,
+            calibration_confirm_s=300.0,
+            calibration_max_deviation_kg_s=6.0,
+            calibration_invalid_policy="rollback",
+        ),
         steam=SteamLimits(12.0, 0.8, 6.0, 30.0, 1.0),
         wash=WashLimits(90.0, 26.0, 4.0, 9.0),
         alarm=AlarmLimits(5.0, 120.0),
@@ -398,6 +448,14 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "flow_tolerance_kg_s": cfg.salt.flow_tolerance_kg_s,
                 "header_pressure_target_mpa": cfg.salt.header_pressure_target_mpa,
                 "header_pressure_max_mpa": cfg.salt.header_pressure_max_mpa,
+                "tolerance_k_sigma": cfg.salt.tolerance_k_sigma,
+                "tolerance_floor_kg_s": cfg.salt.tolerance_floor_kg_s,
+                "tolerance_cap_kg_s": cfg.salt.tolerance_cap_kg_s,
+                "tolerance_ewma_alpha": cfg.salt.tolerance_ewma_alpha,
+                "calibration_valid_for_s": cfg.salt.calibration_valid_for_s,
+                "calibration_confirm_s": cfg.salt.calibration_confirm_s,
+                "calibration_max_deviation_kg_s": cfg.salt.calibration_max_deviation_kg_s,
+                "calibration_invalid_policy": cfg.salt.calibration_invalid_policy,
             },
             "steam": {
                 "pressure_target_mpa": cfg.steam.pressure_target_mpa,
